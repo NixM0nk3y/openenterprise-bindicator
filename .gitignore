@@ -1,0 +1,12 @@
+# Build artifacts
+build.uf2
+bindicator-cli
+
+# Credentials and config
+*.text
+.env
+
+
+#
+.claude
+.devcontainer

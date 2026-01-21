@@ -1,0 +1,142 @@
+[
+    {
+        "id": "c6ea7563264f4495",
+        "type": "tab",
+        "label": "Bindicator Data",
+        "disabled": false,
+        "info": "",
+        "env": []
+    },
+    {
+        "id": "d68afd03996b6db9",
+        "type": "mqtt in",
+        "z": "c6ea7563264f4495",
+        "name": "datarequest",
+        "topic": "bindicator/request",
+        "qos": "2",
+        "datatype": "auto-detect",
+        "broker": "739b2908.4b654",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 390,
+        "y": 320,
+        "wires": [
+            [
+                "51f79b5ece23623a"
+            ]
+        ]
+    },
+    {
+        "id": "51f79b5ece23623a",
+        "type": "http request",
+        "z": "c6ea7563264f4495",
+        "name": "Openenterprise Bin Data",
+        "method": "GET",
+        "ret": "txt",
+        "paytoqs": "ignore",
+        "url": "https://bins.felixyeung.com/api/jobs?premises=1",
+        "tls": "",
+        "persist": false,
+        "proxy": "",
+        "insecureHTTPParser": false,
+        "authType": "",
+        "senderr": false,
+        "headers": [],
+        "x": 590,
+        "y": 320,
+        "wires": [
+            [
+                "transform_csv"
+            ]
+        ]
+    },
+    {
+        "id": "transform_csv",
+        "type": "function",
+        "z": "c6ea7563264f4495",
+        "name": "Transform to CSV",
+        "func": "let data = JSON.parse(msg.payload);\nlet ts = Math.floor(Date.now() / 1000);\nlet jobs = data.data.jobs.map(j => j.date + ':' + j.bin).join(',');\nmsg.payload = ts + ',' + jobs;\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 790,
+        "y": 320,
+        "wires": [
+            [
+                "866bb8c9c3c7fd8a",
+                "51ab8105cad11379"
+            ]
+        ]
+    },
+    {
+        "id": "866bb8c9c3c7fd8a",
+        "type": "debug",
+        "z": "c6ea7563264f4495",
+        "name": "debug 2",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1000,
+        "y": 280,
+        "wires": []
+    },
+    {
+        "id": "51ab8105cad11379",
+        "type": "mqtt out",
+        "z": "c6ea7563264f4495",
+        "name": "binschedule",
+        "topic": "bindicator/response",
+        "qos": "",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "739b2908.4b654",
+        "x": 1010,
+        "y": 360,
+        "wires": []
+    },
+    {
+        "id": "739b2908.4b654",
+        "type": "mqtt-broker",
+        "name": "Jarvis",
+        "broker": "172.18.1.5",
+        "port": "8883",
+        "tls": "506ffa4c.98dc5c",
+        "clientid": "",
+        "usetls": true,
+        "compatmode": false,
+        "keepalive": "60",
+        "cleansession": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthPayload": "",
+        "closeTopic": "",
+        "closeQos": "0",
+        "closePayload": ""
+    },
+    {
+        "id": "506ffa4c.98dc5c",
+        "type": "tls-config",
+        "name": "No-Verify",
+        "cert": "",
+        "key": "",
+        "ca": "",
+        "certname": "",
+        "keyname": "",
+        "caname": "",
+        "servername": "",
+        "verifyservercert": false
+    }
+]
