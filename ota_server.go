@@ -380,21 +380,12 @@ func handleOTASession(conn *tcp.Conn, logger *slog.Logger) {
 		// Calculate flash offset and which sectors need erasing
 		flashOffset := partitionOffset + totalBytes
 
-		// Log chunk receive with hash info for first few chunks (helps debug)
-		if chunkNum < 3 {
-			// Show first 8 bytes of chunk for verification
-			logger.Info("ota:chunk-debug",
-				slog.Int("chunk", chunkNum),
-				slog.Int("size", int(chunkLen)),
-				slog.String("first8", formatHashHex(otaChunk[:8])),
-			)
-		} else if chunkNum%20 == 0 {
-			logger.Debug("ota:chunk-received",
-				slog.Int("chunk", chunkNum),
-				slog.Int("size", int(chunkLen)),
-				slog.Int("total", int(totalBytes)),
-			)
-		}
+		// Log every chunk at DEBUG level (avoids otel/buffer overhead)
+		logger.Debug("ota:chunk-debug",
+			slog.Int("chunk", chunkNum),
+			slog.Int("size", int(chunkLen)),
+			slog.Int("total", int(totalBytes)),
+		)
 
 		// Erase sectors on-demand (4KB each) to avoid blocking for too long
 		startSector := totalBytes / ota.SectorSize

@@ -142,7 +142,7 @@ func Log(severity uint8, msg string) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	if !enabled {
+	if !enabled || paused {
 		return
 	}
 
@@ -209,7 +209,7 @@ func recordMetric(name string, value int64, isGauge bool) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	if !enabled {
+	if !enabled || paused {
 		return
 	}
 
@@ -267,7 +267,7 @@ func StartSpan(s *xnet.StackAsync, name string) int {
 	mu.Lock()
 	defer mu.Unlock()
 
-	if !enabled {
+	if !enabled || paused {
 		return -1
 	}
 
