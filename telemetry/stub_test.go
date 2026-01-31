@@ -29,6 +29,13 @@ const (
 	SpanStatusError = 2
 )
 
+// Span kind (OTLP standard)
+const (
+	SpanKindInternal = 1
+	SpanKindServer   = 2
+	SpanKindClient   = 3
+)
+
 // Pre-allocated body buffer for JSON building (test version)
 var BodyBuf [2048]byte
 
@@ -62,6 +69,7 @@ type Span struct {
 	EndTime    int64
 	NameLen    uint8
 	Name       [32]byte
+	Kind       uint8 // SpanKindInternal, SpanKindServer, SpanKindClient
 	StatusOK   bool
 	Active     bool
 }
@@ -255,6 +263,7 @@ func StartSpanTest(name string) int {
 	span.StartTime = time.Now().UnixNano()
 	span.EndTime = 0
 	span.StatusOK = false
+	span.Kind = SpanKindInternal
 
 	copy(span.TraceID[:], CurrentTraceID[:])
 	copy(span.ParentID[:], CurrentSpanID[:])
