@@ -217,11 +217,10 @@ func otaServerLoop() {
 
 // handleOTASession handles a single OTA update session
 func handleOTASession(conn *tcp.Conn, logger *slog.Logger) {
-	// Log and flush before pausing so the message gets sent
 	logger.Warn("ota:pausing-background-tasks")
-	telemetry.Flush()
 
 	// Pause telemetry and bindicator during OTA to avoid network contention
+	// Note: We don't flush here to avoid stability issues - flush happens just before reboot
 	telemetry.Pause()
 	SetBindicatorPaused(true)
 	defer func() {
@@ -335,6 +334,12 @@ func handleOTASession(conn *tcp.Conn, logger *slog.Logger) {
 				slog.String("flash_offset", formatHex(flashOffset)),
 				slog.String("xip_addr", formatHex(xipAddr)),
 			)
+
+			// Flush telemetry just before reboot to capture validation messages
+			telemetry.Resume() // Resume briefly to allow flush
+			telemetry.Flush()
+			time.Sleep(3000 * time.Millisecond) // Allow network stack to complete
+
 			ota.RebootToPartition(targetPartition)
 			// If we get here, reboot failed
 			errCode := ota.GetRebootResult()
