@@ -72,15 +72,16 @@ type MetricPoint struct {
 
 // Span represents a trace span
 type Span struct {
-	TraceID   [16]byte
-	SpanID    [8]byte
-	ParentID  [8]byte
-	StartTime int64
-	EndTime   int64
-	NameLen   uint8
-	Name      [32]byte
-	StatusOK  bool
-	Active    bool
+	TraceID    [16]byte
+	SpanID     [8]byte
+	ParentID   [8]byte
+	PrevSpanID [8]byte // Previous CurrentSpanID to restore on EndSpan
+	StartTime  int64
+	EndTime    int64
+	NameLen    uint8
+	Name       [32]byte
+	StatusOK   bool
+	Active     bool
 }
 
 // Circular queues for telemetry data
@@ -301,9 +302,10 @@ func StartSpan(s *xnet.StackAsync, name string) int {
 	span.EndTime = 0
 	span.StatusOK = false
 
-	// Copy trace context
+	// Copy trace context and save previous span ID for restoration on EndSpan
 	copy(span.TraceID[:], CurrentTraceID[:])
 	copy(span.ParentID[:], CurrentSpanID[:])
+	copy(span.PrevSpanID[:], CurrentSpanID[:])
 
 	// Generate new span ID
 	r1 := s.Prand32()
@@ -348,6 +350,9 @@ func EndSpan(idx int, statusOK bool) {
 	span.EndTime = time.Now().UnixNano()
 	span.StatusOK = statusOK
 	span.Active = false
+
+	// Restore previous span ID so sibling spans have correct parent
+	copy(CurrentSpanID[:], span.PrevSpanID[:])
 
 	// Add to completed span count
 	if SpanCount < len(SpanQueue) {
