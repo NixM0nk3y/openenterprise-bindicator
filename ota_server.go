@@ -381,11 +381,11 @@ func handleOTASession(conn *tcp.Conn, logger *slog.Logger) {
 		flashOffset := partitionOffset + totalBytes
 
 		// Log every chunk at DEBUG level (avoids otel/buffer overhead)
-		logger.Debug("ota:chunk-debug",
+		/*logger.Debug("ota:chunk-debug",
 			slog.Int("chunk", chunkNum),
 			slog.Int("size", int(chunkLen)),
 			slog.Int("total", int(totalBytes)),
-		)
+		)*/
 
 		// Erase sectors on-demand (4KB each) to avoid blocking for too long
 		startSector := totalBytes / ota.SectorSize
