@@ -37,6 +37,13 @@ const (
 	SpanStatusError = 2
 )
 
+// Span kind (OTLP standard)
+const (
+	SpanKindInternal = 1
+	SpanKindServer   = 2
+	SpanKindClient   = 3
+)
+
 // Pre-allocated TCP buffers (~3KB)
 // TxBuf must be large enough for body (2KB) + headers (~200 bytes)
 var (
@@ -80,6 +87,7 @@ type Span struct {
 	EndTime    int64
 	NameLen    uint8
 	Name       [32]byte
+	Kind       uint8 // SpanKindInternal, SpanKindServer, SpanKindClient
 	StatusOK   bool
 	Active     bool
 }
@@ -301,6 +309,7 @@ func StartSpan(s *xnet.StackAsync, name string) int {
 	span.StartTime = time.Now().UnixNano()
 	span.EndTime = 0
 	span.StatusOK = false
+	span.Kind = SpanKindInternal
 
 	// Copy trace context and save previous span ID for restoration on EndSpan
 	copy(span.TraceID[:], CurrentTraceID[:])
@@ -330,6 +339,18 @@ func StartSpan(s *xnet.StackAsync, name string) int {
 	span.NameLen = uint8(nameLen)
 	copy(span.Name[:], name[:nameLen])
 
+	return idx
+}
+
+// StartServerSpan starts a new server span (creates X-Ray segment, not subsegment).
+// Use this for root spans that should appear as top-level traces in X-Ray.
+func StartServerSpan(s *xnet.StackAsync, name string) int {
+	idx := StartSpan(s, name)
+	if idx >= 0 {
+		mu.Lock()
+		SpanQueue[idx].Kind = SpanKindServer
+		mu.Unlock()
+	}
 	return idx
 }
 

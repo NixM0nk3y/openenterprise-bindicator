@@ -355,7 +355,8 @@ func BuildSpansJSON() int {
 
 		w.writeRaw(`,"name":`)
 		w.writeBytes(span.Name[:], int(span.NameLen))
-		w.writeRaw(`,"kind":1`) // SPAN_KIND_INTERNAL
+		w.writeRaw(`,"kind":`)
+		w.writeInt(int(span.Kind))
 		w.writeRaw(`,"startTimeUnixNano":`)
 		w.writeInt64(span.StartTime)
 		w.writeRaw(`,"endTimeUnixNano":`)

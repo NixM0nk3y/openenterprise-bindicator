@@ -291,8 +291,8 @@ func main() {
 		// Generate trace context for this wake cycle
 		telemetry.GenerateTraceID(stack)
 
-		// Start span for wake cycle
-		cycleSpanIdx := telemetry.StartSpan(stack, "wake-cycle")
+		// Start server span for wake cycle (creates X-Ray segment, not subsegment)
+		cycleSpanIdx := telemetry.StartServerSpan(stack, "wake-cycle")
 
 		// Check if schedule refresh is needed
 		timeSinceLastFetch := time.Since(lastScheduleFetch)
