@@ -236,18 +236,28 @@ func recordMetric(name string, value int64, isGauge bool) {
 	copy(point.Name[:], name[:nameLen])
 }
 
-// GenerateTraceID generates a new trace ID using the stack's PRNG
+// GenerateTraceID generates a new trace ID using the stack's PRNG.
+// The trace ID format is X-Ray compatible:
+// - First 4 bytes: Unix timestamp in seconds (big-endian)
+// - Remaining 12 bytes: Random
 func GenerateTraceID(s *xnet.StackAsync) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	// Generate 16 bytes for trace ID (4 uint32s)
-	for i := 0; i < 4; i++ {
+	// X-Ray compatible trace ID: first 4 bytes are Unix timestamp (seconds)
+	ts := uint32(time.Now().Unix())
+	CurrentTraceID[0] = byte(ts >> 24)
+	CurrentTraceID[1] = byte(ts >> 16)
+	CurrentTraceID[2] = byte(ts >> 8)
+	CurrentTraceID[3] = byte(ts)
+
+	// Remaining 12 bytes are random (3 uint32s)
+	for i := 0; i < 3; i++ {
 		r := s.Prand32()
-		CurrentTraceID[i*4] = byte(r >> 24)
-		CurrentTraceID[i*4+1] = byte(r >> 16)
-		CurrentTraceID[i*4+2] = byte(r >> 8)
-		CurrentTraceID[i*4+3] = byte(r)
+		CurrentTraceID[4+i*4] = byte(r >> 24)
+		CurrentTraceID[4+i*4+1] = byte(r >> 16)
+		CurrentTraceID[4+i*4+2] = byte(r >> 8)
+		CurrentTraceID[4+i*4+3] = byte(r)
 	}
 
 	// Generate 8 bytes for span ID (2 uint32s)
