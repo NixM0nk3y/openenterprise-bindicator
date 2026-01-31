@@ -101,6 +101,7 @@ var (
 	mu        sync.Mutex
 	enabled   bool
 	paused    bool // Paused during OTA or other critical operations
+	sendingWg sync.WaitGroup // Tracks in-progress HTTP operations
 	stack     *xnet.StackAsync
 	logger    *slog.Logger
 	collector netip.AddrPort
@@ -365,11 +366,15 @@ func senderLoop() {
 	}
 }
 
-// Pause temporarily stops telemetry sending (for OTA or other critical operations)
+// Pause temporarily stops telemetry sending (for OTA or other critical operations).
+// Blocks until any in-progress HTTP operations complete to avoid network contention.
 func Pause() {
 	mu.Lock()
 	paused = true
 	mu.Unlock()
+
+	// Wait for any in-progress HTTP operations to complete
+	sendingWg.Wait()
 }
 
 // Resume resumes telemetry sending after a pause
@@ -508,6 +513,10 @@ func flushSpans() {
 
 // sendHTTPPost sends an HTTP POST request to the collector
 func sendHTTPPost(path string, bodyLen int) error {
+	// Track this operation so Pause() can wait for it to complete
+	sendingWg.Add(1)
+	defer sendingWg.Done()
+
 	mu.Lock()
 	s := stack
 	c := collector
