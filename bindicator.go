@@ -28,6 +28,20 @@ const (
 	BinBrown
 )
 
+// String returns the bin type name
+func (b BinType) String() string {
+	switch b {
+	case BinGreen:
+		return "green"
+	case BinBlack:
+		return "black"
+	case BinBrown:
+		return "brown"
+	default:
+		return "unknown"
+	}
+}
+
 // BinJob represents a scheduled bin collection
 type BinJob struct {
 	Year  uint16
@@ -49,6 +63,19 @@ var ledState struct {
 	green bool
 	black bool
 	brown bool
+}
+
+// bindicatorPaused stops LED updates during OTA
+var bindicatorPaused bool
+
+// SetBindicatorPaused pauses/resumes bindicator LED updates
+func SetBindicatorPaused(p bool) {
+	bindicatorPaused = p
+}
+
+// IsBindicatorPaused returns true if bindicator is paused
+func IsBindicatorPaused() bool {
+	return bindicatorPaused
 }
 
 // initLEDs configures the GPIO pins for LED output
@@ -107,6 +134,11 @@ func setLED(binType BinType, on bool) {
 // LED ON: 12 hours before collection (noon day before)
 // LED OFF: 12 hours into collection day (noon on collection day)
 func updateLEDsFromSchedule(jobs []BinJob, now time.Time) {
+	// Skip LED updates during OTA
+	if bindicatorPaused {
+		return
+	}
+
 	greenOn := false
 	blackOn := false
 	brownOn := false
@@ -137,8 +169,7 @@ func updateLEDsFromSchedule(jobs []BinJob, now time.Time) {
 		if bindicatorLogger != nil {
 			bindicatorLogger.Debug("schedule:job",
 				slog.String("date", collectionDate.Format("2006-01-02")),
-				slog.Int("bin", int(job.Bin)),
-				slog.Bool("in_window", inWindow),
+				slog.String("bin", job.Bin.String()),
 			)
 		}
 
@@ -150,6 +181,25 @@ func updateLEDsFromSchedule(jobs []BinJob, now time.Time) {
 				blackOn = true
 			case BinBrown:
 				brownOn = true
+			}
+		}
+	}
+
+	// Log next upcoming collection
+	if bindicatorLogger != nil {
+		for i := 0; i < len(jobs); i++ {
+			job := &jobs[i]
+			collectionDate := time.Date(
+				int(job.Year), time.Month(job.Month), int(job.Day),
+				0, 0, 0, 0, time.UTC,
+			)
+			// Find first collection that hasn't passed yet (noon on collection day)
+			if now.Before(collectionDate.Add(12 * time.Hour)) {
+				bindicatorLogger.Info("schedule:next",
+					slog.String("date", collectionDate.Format("2006-01-02")),
+					slog.String("bin", job.Bin.String()),
+				)
+				break
 			}
 		}
 	}

@@ -8,20 +8,24 @@ import (
 	"log/slog"
 	"machine"
 	"net/netip"
+	"runtime"
 	"time"
 
 	"openenterprise/bindicator/config"
 	"openenterprise/bindicator/credentials"
 	"openenterprise/bindicator/ota"
+	"openenterprise/bindicator/telemetry"
 	"openenterprise/bindicator/version"
 
 	"github.com/soypat/cyw43439"
 	"github.com/soypat/cyw43439/examples/cywnet"
+	"github.com/soypat/lneto/x/xnet"
 )
 
-// Configuration
+// Configuration (loaded from config files, with defaults)
 var (
-	wakeInterval = 3 * time.Hour
+	wakeInterval            = 15 * time.Minute // How often to wake and process LEDs
+	scheduleRefreshInterval = 3 * time.Hour    // How often to fetch schedule from MQTT
 )
 
 // Global WiFi stack reference for shutdown
@@ -42,6 +46,22 @@ var (
 	lastSuccessfulRefresh time.Time
 	consecutiveFailures   int
 	systemHealthy         = true // When false, stop feeding watchdog to trigger reset
+)
+
+// Schedule refresh tracking (separate from watchdog state)
+var lastScheduleFetch time.Time
+
+// ForceScheduleRefresh forces the next wake cycle to refresh the schedule
+// (used by manual refresh command)
+var forceScheduleRefresh bool
+
+// NTP tracking
+var (
+	lastNTPSync   time.Time
+	ntpSyncCount  int
+	ntpFailCount  int
+	ntpTimeOffset time.Duration  // Last known offset from NTP
+	dnsServers    []netip.Addr   // DNS servers from DHCP (for NTP lookups)
 )
 
 // Functional watchdog thresholds
@@ -123,7 +143,8 @@ func main() {
 	}
 
 	// Setup application logger (debug level for our code)
-	logger := slog.New(slog.NewTextHandler(machine.Serial, &slog.HandlerOptions{
+	// Uses telemetry.SlogHandler to bridge logs to both console and OpenTelemetry
+	logger := slog.New(telemetry.NewSlogHandler(machine.Serial, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}))
 
@@ -145,7 +166,20 @@ func main() {
 	machine.Watchdog.Start()
 	logger.Info("init:watchdog-started")
 
-	logger.Info("init:complete")
+	// Log boot info
+	bootPartition := "A"
+	if ota.GetCurrentPartition() == ota.PartitionB {
+		bootPartition = "B"
+	}
+	shortSHA := version.GitSHA
+	if len(shortSHA) > 7 {
+		shortSHA = shortSHA[:7]
+	}
+	logger.Info("init:complete",
+		slog.String("version", version.Version),
+		slog.String("sha", shortSHA),
+		slog.String("partition", bootPartition),
+	)
 
 	// Get MQTT broker address from config
 	brokerAddr, err := config.BrokerAddr()
@@ -154,6 +188,14 @@ func main() {
 		fatalError("Invalid broker address - waiting for reset...")
 	}
 	logger.Info("config:broker", slog.String("addr", brokerAddr.String()))
+
+	// Load timing configuration
+	wakeInterval = config.WakeInterval()
+	scheduleRefreshInterval = config.ScheduleRefreshInterval()
+	logger.Info("config:timing",
+		slog.Duration("wake_interval", wakeInterval),
+		slog.Duration("schedule_refresh_interval", scheduleRefreshInterval),
+	)
 
 	// Initialize WiFi (use quieter logger for network stack)
 	devcfg := cyw43439.DefaultWifiConfig()
@@ -199,8 +241,31 @@ func main() {
 	// Track WiFi connection time
 	wifiStats.connectTime = time.Now()
 
+	// Store DNS servers for NTP lookups
+	dnsServers = dhcpResults.DNSServers
+
 	// Get network stack reference
 	stack := cystack.LnetoStack()
+
+	// Sync time via NTP before telemetry init (so telemetry has correct timestamps)
+	logger.Info("ntp:init", slog.String("server", config.NTPServer()))
+	if _, err := syncNTP(stack, dnsServers, logger); err != nil {
+		// NTP failure is non-fatal, but log it prominently
+		logger.Warn("ntp:init-failed", slog.String("err", err.Error()))
+		logger.Warn("ntp:time-not-synced", slog.String("fallback", "MQTT timestamp"))
+	}
+
+	// Initialize telemetry (if enabled)
+	if config.TelemetryEnabled() {
+		collectorAddr, err := config.TelemetryCollectorAddr()
+		if err != nil {
+			logger.Warn("telemetry:config-invalid", slog.String("err", err.Error()))
+		} else if err := telemetry.Init(stack, logger, collectorAddr); err != nil {
+			logger.Warn("telemetry:init-failed", slog.String("err", err.Error()))
+		}
+	} else {
+		logger.Info("telemetry:disabled")
+	}
 
 	// Start debug console server
 	go consoleServer(stack, logger, refreshChan)
@@ -210,50 +275,154 @@ func main() {
 
 	// Initialize last successful refresh to now (give grace period on boot)
 	lastSuccessfulRefresh = time.Now()
+	// Initialize last schedule fetch to zero so first cycle always fetches
+	lastScheduleFetch = time.Time{}
 
-	// Main loop - time is synced via MQTT response
+	// Main loop - decoupled schedule refresh from LED processing
+	// LEDs are processed every wakeInterval (default 15m) for responsive updates
+	// Schedule is fetched every scheduleRefreshInterval (default 3h) to reduce network load
 	for {
 		feedWatchdogIfHealthy()
 
-		// Track MQTT attempt
-		wifiStats.lastMQTTAttempt = time.Now()
+		// Generate trace context for this wake cycle
+		telemetry.GenerateTraceID(stack)
 
-		// Fetch schedule via MQTT (also syncs time from response)
-		jobs, err := fetchScheduleViaMQTT(stack, brokerAddr, logger)
-		if err != nil {
-			logger.Error("mqtt:failed", slog.String("err", err.Error()))
-			wifiStats.mqttFailCount++
-			consecutiveFailures++
-			logger.Warn("watchdog:failure-count",
-				slog.Int("consecutive", consecutiveFailures),
-				slog.Int("max", maxConsecutiveFailures),
-			)
-			logger.Info("leds:keeping-previous-state")
-			checkSystemHealth(logger)
-			goto sleep
-		}
+		// Start server span for wake cycle (creates X-Ray segment, not subsegment)
+		cycleSpanIdx := telemetry.StartServerSpan(stack, "wake-cycle")
 
-		// Track MQTT success
-		wifiStats.lastMQTTSuccess = time.Now()
-		wifiStats.mqttSuccessCount++
+		// Check if schedule refresh is needed
+		timeSinceLastFetch := time.Since(lastScheduleFetch)
+		needsScheduleRefresh := timeSinceLastFetch >= scheduleRefreshInterval || forceScheduleRefresh
+		manualRefresh := forceScheduleRefresh
+		forceScheduleRefresh = false // Reset the flag
 
-		// Success - reset failure count and update timestamp
-		consecutiveFailures = 0
-		lastSuccessfulRefresh = time.Now()
-		logger.Info("watchdog:refresh-success",
-			slog.String("time", lastSuccessfulRefresh.Format("15:04:05")),
+		logger.Info("cycle:start",
+			slog.Duration("since_last_fetch", timeSinceLastFetch),
+			slog.Bool("needs_refresh", needsScheduleRefresh),
+			slog.Bool("manual_refresh", manualRefresh),
 		)
+
+		if needsScheduleRefresh {
+			// Resync NTP on schedule refresh cycles to maintain accurate time
+			ntpSpanIdx := telemetry.StartSpan(stack, "ntp-sync")
+			if offset, err := syncNTP(stack, dnsServers, logger); err != nil {
+				telemetry.SetSpanStatus(ntpSpanIdx, err.Error())
+				telemetry.EndSpan(ntpSpanIdx, false)
+				logger.Warn("ntp:resync-failed", slog.String("err", err.Error()))
+			} else {
+				telemetry.SetSpanStatus(ntpSpanIdx, formatDuration(offset))
+				telemetry.EndSpan(ntpSpanIdx, true)
+			}
+
+			feedWatchdogIfHealthy()
+
+			// MQTT retry with exponential backoff: 16s -> 32s -> 60s (max)
+			const (
+				mqttMinBackoff = 16 * time.Second
+				mqttMaxBackoff = 60 * time.Second
+				mqttMaxRetries = 3
+			)
+			var mqttSuccess bool
+			mqttBackoff := mqttMinBackoff
+
+			// Start child span for MQTT refresh (covers all retries)
+			mqttSpanIdx := telemetry.StartSpan(stack, "mqtt-refresh")
+
+			for attempt := 0; attempt <= mqttMaxRetries; attempt++ {
+				// Track MQTT attempt
+				wifiStats.lastMQTTAttempt = time.Now()
+
+				if attempt > 0 {
+					logger.Info("mqtt:backoff",
+						slog.Int("attempt", attempt+1),
+						slog.Duration("wait", mqttBackoff),
+					)
+					sleepWithWatchdog(mqttBackoff)
+					// Exponential backoff, capped at max
+					mqttBackoff = mqttBackoff * 2
+					if mqttBackoff > mqttMaxBackoff {
+						mqttBackoff = mqttMaxBackoff
+					}
+				}
+
+				feedWatchdogIfHealthy()
+				logger.Info("schedule:fetching", slog.Int("attempt", attempt+1))
+
+				// Fetch schedule via MQTT
+				jobs, err := fetchScheduleViaMQTT(stack, brokerAddr, logger)
+				if err != nil {
+					logger.Error("mqtt:failed",
+						slog.String("err", err.Error()),
+						slog.Int("attempt", attempt+1),
+					)
+					wifiStats.mqttFailCount++
+
+					// If more retries available, continue; otherwise fail
+					if attempt < mqttMaxRetries {
+						continue
+					}
+
+					// All retries exhausted
+					telemetry.SetSpanStatus(mqttSpanIdx, err.Error())
+					telemetry.EndSpan(mqttSpanIdx, false)
+					consecutiveFailures++
+					logger.Warn("watchdog:failure-count",
+						slog.Int("consecutive", consecutiveFailures),
+						slog.Int("max", maxConsecutiveFailures),
+					)
+					logger.Info("schedule:using-cached",
+						slog.Int("cached_jobs", len(getJobs())),
+					)
+					checkSystemHealth(logger)
+				} else {
+					// Success
+					telemetry.SetSpanStatus(mqttSpanIdx, formatJobCount(len(jobs)))
+					telemetry.EndSpan(mqttSpanIdx, true)
+					wifiStats.lastMQTTSuccess = time.Now()
+					wifiStats.mqttSuccessCount++
+					lastScheduleFetch = time.Now()
+
+					// Record metrics
+					telemetry.RecordCounter("mqtt.success.count", int64(wifiStats.mqttSuccessCount))
+					telemetry.RecordCounter("mqtt.fail.count", int64(wifiStats.mqttFailCount))
+
+					// Success - reset failure count and update timestamp
+					consecutiveFailures = 0
+					lastSuccessfulRefresh = time.Now()
+					logger.Info("schedule:fetched",
+						slog.Int("jobs", len(jobs)),
+						slog.String("time", lastSuccessfulRefresh.Format("15:04:05")),
+					)
+					mqttSuccess = true
+					break // Exit retry loop on success
+				}
+			}
+			_ = mqttSuccess // Avoid unused variable warning
+		}
 
 		feedWatchdogIfHealthy()
 
-		// Update LEDs based on schedule
-		logger.Info("schedule:updating-leds", slog.Int("jobs", len(jobs)))
-		updateLEDsFromSchedule(jobs, time.Now())
+		// Always process LEDs based on current schedule (cached or fresh)
+		// This ensures LEDs respond to 12-hour thresholds within wakeInterval
+		ledSpanIdx := telemetry.StartSpan(stack, "led-update")
+		jobs := getJobs()
+		now := time.Now()
+		logger.Info("leds:processing",
+			slog.Int("jobs", len(jobs)),
+			slog.String("time", now.Format("15:04:05")),
+		)
+		updateLEDsFromSchedule(jobs, now)
 		logLEDState(logger)
+		telemetry.EndSpan(ledSpanIdx, true)
 
-	sleep:
+		// End wake cycle span
+		telemetry.EndSpan(cycleSpanIdx, true)
+
 		// Sleep until next cycle, but wake early on manual refresh request
-		logger.Info("sleep:starting", slog.Duration("duration", wakeInterval))
+		logger.Info("sleep:starting",
+			slog.Duration("duration", wakeInterval),
+			slog.Duration("until_next_refresh", scheduleRefreshInterval-time.Since(lastScheduleFetch)),
+		)
 		sleepWithRefreshCheck(wakeInterval, refreshChan, logger)
 		logger.Info("sleep:waking")
 	}
@@ -279,6 +448,7 @@ func sleepWithRefreshCheck(duration time.Duration, refreshChan chan struct{}, lo
 		select {
 		case <-refreshChan:
 			logger.Info("sleep:manual-refresh-triggered")
+			forceScheduleRefresh = true // Force schedule fetch on next cycle
 			return
 		case <-time.After(checkInterval):
 			elapsed += checkInterval
@@ -344,4 +514,171 @@ func loopForeverStack(stack *cywnet.Stack) {
 			count = 0
 		}
 	}
+}
+
+// NTP fallback servers if primary fails
+var ntpFallbackServers = []string{
+	"time.cloudflare.com",
+	"time.google.com",
+	"pool.ntp.org",
+}
+
+// syncNTP performs NTP time synchronization.
+// Tries configured server first, then fallbacks. Tries all resolved IPs.
+// Uses exponential backoff between attempts (max 30s) to avoid hammering servers.
+// Returns the time offset applied, or an error if all attempts fail.
+func syncNTP(stack *xnet.StackAsync, dnsServers []netip.Addr, logger *slog.Logger) (time.Duration, error) {
+	// Build list of servers to try: configured first, then fallbacks
+	servers := []string{config.NTPServer()}
+	for _, fallback := range ntpFallbackServers {
+		if fallback != servers[0] { // Don't duplicate if configured matches fallback
+			servers = append(servers, fallback)
+		}
+	}
+
+	rstack := stack.StackRetrying(pollTime)
+	var lastErr error
+	backoff := 500 * time.Millisecond // Initial backoff
+	const maxBackoff = 30 * time.Second
+
+	for _, ntpHost := range servers {
+		logger.Info("ntp:trying", slog.String("server", ntpHost))
+		feedWatchdogIfHealthy()
+
+		// Small delay to let network stack settle
+		time.Sleep(100 * time.Millisecond)
+
+		// DNS lookup for NTP server
+		addrs, err := rstack.DoLookupIP(ntpHost, 5*time.Second, 2)
+		if err != nil {
+			logger.Warn("ntp:dns-failed", slog.String("server", ntpHost), slog.String("err", err.Error()))
+			lastErr = err
+
+			// Exponential backoff before trying next server
+			logger.Info("ntp:backoff", slog.Duration("wait", backoff))
+			sleepWithWatchdog(backoff)
+			backoff = backoff * 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			continue
+		}
+		logger.Info("ntp:dns-resolved", slog.String("server", ntpHost), slog.Int("addrs", len(addrs)))
+
+		// Try each resolved address
+		for i, addr := range addrs {
+			feedWatchdogIfHealthy()
+
+			// Delay between attempts to let network stack process
+			time.Sleep(200 * time.Millisecond)
+
+			logger.Info("ntp:requesting", slog.String("addr", addr.String()), slog.Int("attempt", i+1))
+
+			// Use shorter timeout per address since we'll try multiple
+			offset, err := rstack.DoNTP(addr, 5*time.Second, 3)
+			if err != nil {
+				logger.Warn("ntp:addr-failed", slog.String("addr", addr.String()), slog.String("err", err.Error()))
+				lastErr = err
+
+				// Exponential backoff before trying next address
+				logger.Info("ntp:backoff", slog.Duration("wait", backoff))
+				sleepWithWatchdog(backoff)
+				backoff = backoff * 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+				continue
+			}
+
+			// Success - apply time offset
+			runtime.AdjustTimeOffset(int64(offset))
+			ntpTimeOffset = offset
+			lastNTPSync = time.Now()
+			ntpSyncCount++
+
+			logger.Info("ntp:synced",
+				slog.String("server", ntpHost),
+				slog.String("addr", addr.String()),
+				slog.String("time", time.Now().Format("2006-01-02 15:04:05")),
+				slog.Duration("offset", offset),
+			)
+			return offset, nil
+		}
+	}
+
+	// All servers/addresses failed
+	ntpFailCount++
+	logger.Error("ntp:all-failed", slog.Int("servers_tried", len(servers)))
+	return 0, lastErr
+}
+
+// sleepWithWatchdog sleeps for the given duration while keeping the watchdog fed
+func sleepWithWatchdog(d time.Duration) {
+	// Sleep in 2-second chunks to keep watchdog fed (8s timeout)
+	for d > 0 {
+		chunk := 2 * time.Second
+		if d < chunk {
+			chunk = d
+		}
+		time.Sleep(chunk)
+		feedWatchdogIfHealthy()
+		d -= chunk
+	}
+}
+
+// formatDuration formats a duration for span status (e.g., "offset:+1.234s")
+func formatDuration(d time.Duration) string {
+	// Simple formatting: "offset:±Xs" or "offset:±Xms"
+	ms := d.Milliseconds()
+	if ms == 0 {
+		return "offset:0ms"
+	}
+	sign := "+"
+	if ms < 0 {
+		sign = "-"
+		ms = -ms
+	}
+	if ms >= 1000 {
+		secs := ms / 1000
+		frac := (ms % 1000) / 100 // One decimal place
+		if frac > 0 {
+			return "offset:" + sign + itoa(int(secs)) + "." + itoa(int(frac)) + "s"
+		}
+		return "offset:" + sign + itoa(int(secs)) + "s"
+	}
+	return "offset:" + sign + itoa(int(ms)) + "ms"
+}
+
+// formatJobCount formats job count for span status (e.g., "jobs:3")
+func formatJobCount(n int) string {
+	return "jobs:" + itoa(n)
+}
+
+// itoa converts an int to a string without allocation (for small positive numbers)
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	if n < 0 {
+		return "-" + itoa(-n)
+	}
+	// Handle numbers up to 999
+	if n < 10 {
+		return string([]byte{'0' + byte(n)})
+	}
+	if n < 100 {
+		return string([]byte{'0' + byte(n/10), '0' + byte(n%10)})
+	}
+	if n < 1000 {
+		return string([]byte{'0' + byte(n/100), '0' + byte((n/10)%10), '0' + byte(n%10)})
+	}
+	// Fallback for larger numbers (rare case)
+	var buf [10]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = '0' + byte(n%10)
+		n /= 10
+	}
+	return string(buf[i:])
 }

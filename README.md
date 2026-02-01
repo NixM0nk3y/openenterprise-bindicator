@@ -27,9 +27,15 @@ The lneto network stack doesn't support TLS, so MQTT over plain TCP to a local b
 
 ### Core Functionality
 
-- Wakes every 3 hours to check bin collection schedule
-- Fetches schedule via MQTT from Node-RED
-- Automatic time synchronization from MQTT response timestamp
+- **Decoupled schedule refresh and LED processing** for responsive LED updates:
+  - Wakes every 15 minutes (configurable) to process LED states
+  - Fetches schedule via MQTT every 3 hours (configurable)
+  - LEDs respond to 12-hour thresholds within 15 minutes instead of up to 3 hours
+- **NTP time synchronization** for accurate timestamps:
+  - Syncs time via NTP immediately after WiFi connection
+  - Resyncs on each schedule refresh cycle (every 3 hours)
+  - Uses UK NTP pool by default (configurable)
+  - Ensures accurate telemetry timestamps from boot
 - LED toggles ON 12 hours before collection (noon the day before)
 - LED toggles OFF 12 hours into collection day (noon on collection day)
 - Stores up to 15 scheduled jobs
@@ -56,6 +62,14 @@ The lneto network stack doesn't support TLS, so MQTT over plain TCP to a local b
 - MQTT over TCP (plain, no TLS - use local broker)
 - Random MQTT client ID to prevent conflicts with multiple units
 - Telnet debug console with full IAC protocol support
+
+### Telemetry
+
+- OpenTelemetry-compatible logs, metrics, and traces
+- OTLP/HTTP JSON format (port 4318)
+- Automatic slog bridge for application logs
+- Distributed tracing with trace context propagation
+- See `docs/telemetry.md` for full documentation
 
 ## Watchdog & Recovery
 
@@ -115,6 +129,44 @@ your-secure-password
 
 The console uses progressive lockout after failed attempts (5s after 3 failures, 30s after 5, 5min after 10).
 
+### Telemetry Collector (Optional)
+
+Create `config/telemetry_collector.text` with your OTLP collector address:
+
+```
+192.168.1.100:4318
+```
+
+The device sends logs, metrics, and traces to this endpoint. If not configured, telemetry is disabled.
+
+### Timing Configuration (Optional)
+
+The device uses decoupled intervals for LED processing and schedule fetching:
+
+**`config/wake_interval.text`** - How often to wake and process LEDs (default: 15m):
+
+```
+15m
+```
+
+**`config/schedule_refresh_interval.text`** - How often to fetch schedule from MQTT (default: 3h):
+
+```
+3h
+```
+
+This decoupling ensures LEDs respond to the 12-hour collection threshold within the wake interval (15 minutes by default), rather than waiting for the next schedule fetch (up to 3 hours). The schedule is cached between fetches, reducing network load while maintaining responsive LED updates.
+
+### NTP Server (Optional)
+
+Create `config/ntp_server.text` with your preferred NTP server (default: uk.pool.ntp.org):
+
+```
+uk.pool.ntp.org
+```
+
+The device syncs time via NTP immediately after WiFi connection and on each schedule refresh cycle. This ensures accurate timestamps for telemetry and LED timing from boot.
+
 ## MQTT Topics
 
 | Topic                 | Direction       | Format                                          |
@@ -126,13 +178,20 @@ Example response: `1737207000,2026-01-17:BLACK,2026-01-31:GREEN,2026-02-14:BROWN
 
 ### Time Synchronization
 
-The Unix timestamp prefix syncs the device clock on every successful MQTT fetch. This is critical because:
+The device uses NTP as the primary time source, with MQTT timestamp as a fallback:
+
+1. **NTP sync at boot** - Immediately after WiFi/DHCP, before telemetry initialization
+2. **NTP resync** - On each schedule refresh cycle (every 3 hours by default)
+3. **MQTT fallback** - If NTP fails, time is still synced from MQTT response timestamp
+
+This is critical because:
 
 - The Pico 2 has no RTC battery backup
 - LED timing depends on accurate time (noon triggers)
+- Telemetry requires accurate timestamps from boot
 - Time resets to epoch (1970-01-01) on every reboot
 
-The device uses `runtime.AdjustTimeOffset()` to set system time from the MQTT response.
+The device uses `runtime.AdjustTimeOffset()` to set system time.
 
 ## Node-RED Flow
 
@@ -310,6 +369,10 @@ Or use the CLI tool which handles authentication automatically:
 | `led-green`        | Toggle green LED                                                |
 | `led-black`        | Toggle black LED                                                |
 | `led-brown`        | Toggle brown LED                                                |
+| `telemetry`        | Show telemetry status (queues, sent counts, errors)             |
+| `telemetry-flush`  | Force immediate flush of telemetry queues                       |
+| `ntp`              | Show NTP status (server, last sync, offset, sync count)         |
+| `ntp-sync`         | Trigger immediate NTP time synchronization                      |
 | `reboot`           | Reboot the device immediately                                   |
 
 ## Serial Monitor
@@ -332,9 +395,13 @@ tinygo monitor
 │   └── cli/          # CLI tool for interacting with device
 │       └── main.go
 ├── config/
-│   ├── config.go     # Broker config embedding
-│   ├── broker.text   # MQTT broker address
-│   └── clientid.text # MQTT client ID prefix
+│   ├── config.go              # Config embedding
+│   ├── broker.text            # MQTT broker address
+│   ├── clientid.text          # MQTT client ID prefix
+│   ├── telemetry_collector.text # OTLP collector address
+│   ├── wake_interval.text     # LED processing interval (default: 15m)
+│   ├── schedule_refresh_interval.text # MQTT fetch interval (default: 3h)
+│   └── ntp_server.text        # NTP server hostname (default: uk.pool.ntp.org)
 ├── credentials/
 │   ├── credentials.go
 │   ├── ssid.text             # WiFi SSID
@@ -342,11 +409,16 @@ tinygo monitor
 │   └── console_password.text # Debug console password
 ├── ota/
 │   └── ota.go        # OTA update support (ROM function wrappers)
+├── telemetry/
+│   ├── telemetry.go  # OTLP telemetry (logs, metrics, traces)
+│   ├── json.go       # Zero-allocation JSON serialization
+│   └── slog.go       # slog.Handler bridge
 ├── partitions/
 │   └── bindicator.json  # A/B partition table for OTA
 ├── docs/
 │   ├── ota.md                # OTA system documentation
-│   └── debug-console.md      # Debug console implementation notes
+│   ├── debug-console.md      # Debug console implementation notes
+│   └── telemetry.md          # Telemetry configuration and usage
 ├── version/
 │   └── version.go    # Build info (injected via ldflags)
 ├── nodered/
@@ -365,16 +437,19 @@ tinygo monitor
 
 ## Memory Usage
 
-Static buffer allocation (~12KB total):
+Static buffer allocation (~20KB total):
 
-| Buffer           | Size       | Notes                |
-| ---------------- | ---------- | -------------------- |
-| TCP RX/TX (MQTT) | 4060 bytes | Shared RX/TX         |
-| MQTT decoder     | 512 bytes  | User buffer          |
-| Console buffers  | 3072 bytes | RX + TX + work       |
-| Job storage      | 80 bytes   | Max 15 jobs          |
-| OTA chunk buffer | 4096 bytes | Allocated during OTA |
-| OTA hash buffer  | 512 bytes  | Allocated during OTA |
+| Buffer             | Size       | Notes                      |
+| ------------------ | ---------- | -------------------------- |
+| TCP RX/TX (MQTT)   | 4060 bytes | Shared RX/TX               |
+| MQTT decoder       | 512 bytes  | User buffer                |
+| Console buffers    | 3072 bytes | RX + TX + work             |
+| Job storage        | 80 bytes   | Max 15 jobs                |
+| OTA chunk buffer   | 4096 bytes | Allocated during OTA       |
+| OTA hash buffer    | 512 bytes  | Allocated during OTA       |
+| Telemetry TCP      | 3072 bytes | RX + TX buffers            |
+| Telemetry body     | 2048 bytes | JSON payload buffer        |
+| Telemetry queues   | ~2KB       | Logs, metrics, spans       |
 
 The firmware uses a zero-heap design with pre-allocated buffers for predictable memory usage on the Pico 2's 264KB RAM.
 
@@ -393,6 +468,8 @@ Tests cover:
 - LED/schedule logic (`bindicator_test.go`)
 - CSV response parsing (`parse_test.go`)
 - UF2 extraction (`cmd/cli/ota_test.go`)
+- Telemetry logs, metrics, spans (`telemetry/telemetry_test.go`)
+- OTLP JSON serialization (`telemetry/json_test.go`)
 
 ## References
 
