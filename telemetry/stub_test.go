@@ -71,7 +71,8 @@ type Span struct {
 	Name       [32]byte
 	Kind       uint8 // SpanKindInternal, SpanKindServer, SpanKindClient
 	StatusOK   bool
-	Active     bool
+	Active     bool // Currently recording (between StartSpan and EndSpan)
+	Pending    bool // Completed but not yet flushed
 }
 
 // Circular queues for telemetry data
@@ -246,20 +247,23 @@ func StartSpanTest(name string) int {
 		return -1
 	}
 
+	// Find an available slot (not active and not pending flush)
 	idx := -1
 	for i := 0; i < len(SpanQueue); i++ {
-		if !SpanQueue[i].Active {
+		if !SpanQueue[i].Active && !SpanQueue[i].Pending {
 			idx = i
 			break
 		}
 	}
 	if idx == -1 {
+		// All slots in use, use oldest (may lose pending span)
 		idx = SpanHead
 		SpanHead = (SpanHead + 1) % len(SpanQueue)
 	}
 
 	span := &SpanQueue[idx]
 	span.Active = true
+	span.Pending = false
 	span.StartTime = time.Now().UnixNano()
 	span.EndTime = 0
 	span.StatusOK = false
@@ -301,6 +305,7 @@ func EndSpan(idx int, statusOK bool) {
 	span.EndTime = time.Now().UnixNano()
 	span.StatusOK = statusOK
 	span.Active = false
+	span.Pending = true // Mark as pending flush (don't reuse slot until flushed)
 
 	// Restore previous span ID so sibling spans have correct parent
 	copy(CurrentSpanID[:], span.PrevSpanID[:])
@@ -336,18 +341,66 @@ func GetMetricQueue() []MetricPoint {
 	return result
 }
 
-// GetSpanQueue returns completed spans for testing
+// GetSpanQueue returns completed (pending) spans for testing
 func GetSpanQueue() []Span {
 	mu.Lock()
 	defer mu.Unlock()
 
 	var result []Span
 	for i := 0; i < len(SpanQueue); i++ {
-		if !SpanQueue[i].Active && SpanQueue[i].EndTime > 0 {
+		if SpanQueue[i].Pending {
 			result = append(result, SpanQueue[i])
 		}
 	}
 	return result
+}
+
+// FlushSpans simulates flushing spans (clears pending flag, resets count)
+func FlushSpans() {
+	mu.Lock()
+	defer mu.Unlock()
+
+	SpanCount = 0
+	for i := range SpanQueue {
+		if SpanQueue[i].Pending {
+			SpanQueue[i].Pending = false
+		}
+	}
+}
+
+// GetActiveSpanCount returns the number of active (in-progress) spans
+func GetActiveSpanCount() int {
+	mu.Lock()
+	defer mu.Unlock()
+
+	count := 0
+	for i := range SpanQueue {
+		if SpanQueue[i].Active {
+			count++
+		}
+	}
+	return count
+}
+
+// GetPendingSpanCount returns the number of pending (completed but not flushed) spans
+func GetPendingSpanCount() int {
+	mu.Lock()
+	defer mu.Unlock()
+
+	count := 0
+	for i := range SpanQueue {
+		if SpanQueue[i].Pending {
+			count++
+		}
+	}
+	return count
+}
+
+// GetCurrentSpanID returns the current span ID for testing parent relationships
+func GetCurrentSpanID() [8]byte {
+	mu.Lock()
+	defer mu.Unlock()
+	return CurrentSpanID
 }
 
 // Enable enables telemetry
