@@ -657,3 +657,79 @@ func TestSpanQueueMixedActiveAndPending(t *testing.T) {
 	EndSpan(idx3, true)
 	EndSpan(idx4, true)
 }
+
+func TestSetSpanStatus(t *testing.T) {
+	ResetState()
+	SetTraceContext([16]byte{1, 2, 3}, [8]byte{})
+
+	idx := StartSpanTest("test-op")
+	SetSpanStatus(idx, "success:result")
+	EndSpan(idx, true)
+
+	spans := GetSpanQueue()
+	if len(spans) != 1 {
+		t.Fatalf("expected 1 span, got %d", len(spans))
+	}
+
+	msg := string(spans[0].StatusMsg[:spans[0].StatusLen])
+	if msg != "success:result" {
+		t.Errorf("status message = %q, want %q", msg, "success:result")
+	}
+}
+
+func TestSetSpanStatusTruncation(t *testing.T) {
+	ResetState()
+	SetTraceContext([16]byte{1, 2, 3}, [8]byte{})
+
+	idx := StartSpanTest("test-op")
+
+	// Create a message longer than the 48-byte buffer
+	longMsg := strings.Repeat("x", 100)
+	SetSpanStatus(idx, longMsg)
+	EndSpan(idx, true)
+
+	spans := GetSpanQueue()
+	if len(spans) != 1 {
+		t.Fatalf("expected 1 span, got %d", len(spans))
+	}
+
+	// Should be truncated to 48 bytes
+	if spans[0].StatusLen != 48 {
+		t.Errorf("status length = %d, want 48 (truncated)", spans[0].StatusLen)
+	}
+
+	msg := string(spans[0].StatusMsg[:spans[0].StatusLen])
+	expected := strings.Repeat("x", 48)
+	if msg != expected {
+		t.Errorf("status message = %q, want %q", msg, expected)
+	}
+}
+
+func TestSetSpanStatusOnInactiveSpan(t *testing.T) {
+	ResetState()
+	SetTraceContext([16]byte{1, 2, 3}, [8]byte{})
+
+	idx := StartSpanTest("test-op")
+	EndSpan(idx, true)
+
+	// Try to set status on already-ended span (should be ignored)
+	SetSpanStatus(idx, "should-be-ignored")
+
+	spans := GetSpanQueue()
+	if len(spans) != 1 {
+		t.Fatalf("expected 1 span, got %d", len(spans))
+	}
+
+	// Status should be empty (was set after EndSpan)
+	if spans[0].StatusLen != 0 {
+		t.Errorf("status length = %d, want 0 (should not be set after EndSpan)", spans[0].StatusLen)
+	}
+}
+
+func TestSetSpanStatusInvalidIndex(t *testing.T) {
+	ResetState()
+
+	// Should not panic with invalid index
+	SetSpanStatus(-1, "test")
+	SetSpanStatus(100, "test")
+}

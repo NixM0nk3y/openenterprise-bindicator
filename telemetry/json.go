@@ -367,6 +367,10 @@ func BuildSpansJSON() int {
 		} else {
 			w.writeInt(SpanStatusError)
 		}
+		if span.StatusLen > 0 {
+			w.writeRaw(`,"message":`)
+			w.writeBytes(span.StatusMsg[:], int(span.StatusLen))
+		}
 		w.writeRaw(`}}`)
 
 		// Clear the span after sending

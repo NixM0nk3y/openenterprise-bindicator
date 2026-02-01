@@ -305,10 +305,12 @@ func main() {
 		if needsScheduleRefresh {
 			// Resync NTP on schedule refresh cycles to maintain accurate time
 			ntpSpanIdx := telemetry.StartSpan(stack, "ntp-sync")
-			if _, err := syncNTP(stack, dnsServers, logger); err != nil {
+			if offset, err := syncNTP(stack, dnsServers, logger); err != nil {
+				telemetry.SetSpanStatus(ntpSpanIdx, err.Error())
 				telemetry.EndSpan(ntpSpanIdx, false)
 				logger.Warn("ntp:resync-failed", slog.String("err", err.Error()))
 			} else {
+				telemetry.SetSpanStatus(ntpSpanIdx, formatDuration(offset))
 				telemetry.EndSpan(ntpSpanIdx, true)
 			}
 
@@ -361,6 +363,7 @@ func main() {
 					}
 
 					// All retries exhausted
+					telemetry.SetSpanStatus(mqttSpanIdx, err.Error())
 					telemetry.EndSpan(mqttSpanIdx, false)
 					consecutiveFailures++
 					logger.Warn("watchdog:failure-count",
@@ -373,6 +376,7 @@ func main() {
 					checkSystemHealth(logger)
 				} else {
 					// Success
+					telemetry.SetSpanStatus(mqttSpanIdx, formatJobCount(len(jobs)))
 					telemetry.EndSpan(mqttSpanIdx, true)
 					wifiStats.lastMQTTSuccess = time.Now()
 					wifiStats.mqttSuccessCount++
@@ -620,4 +624,61 @@ func sleepWithWatchdog(d time.Duration) {
 		feedWatchdogIfHealthy()
 		d -= chunk
 	}
+}
+
+// formatDuration formats a duration for span status (e.g., "offset:+1.234s")
+func formatDuration(d time.Duration) string {
+	// Simple formatting: "offset:±Xs" or "offset:±Xms"
+	ms := d.Milliseconds()
+	if ms == 0 {
+		return "offset:0ms"
+	}
+	sign := "+"
+	if ms < 0 {
+		sign = "-"
+		ms = -ms
+	}
+	if ms >= 1000 {
+		secs := ms / 1000
+		frac := (ms % 1000) / 100 // One decimal place
+		if frac > 0 {
+			return "offset:" + sign + itoa(int(secs)) + "." + itoa(int(frac)) + "s"
+		}
+		return "offset:" + sign + itoa(int(secs)) + "s"
+	}
+	return "offset:" + sign + itoa(int(ms)) + "ms"
+}
+
+// formatJobCount formats job count for span status (e.g., "jobs:3")
+func formatJobCount(n int) string {
+	return "jobs:" + itoa(n)
+}
+
+// itoa converts an int to a string without allocation (for small positive numbers)
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	if n < 0 {
+		return "-" + itoa(-n)
+	}
+	// Handle numbers up to 999
+	if n < 10 {
+		return string([]byte{'0' + byte(n)})
+	}
+	if n < 100 {
+		return string([]byte{'0' + byte(n/10), '0' + byte(n%10)})
+	}
+	if n < 1000 {
+		return string([]byte{'0' + byte(n/100), '0' + byte((n/10)%10), '0' + byte(n%10)})
+	}
+	// Fallback for larger numbers (rare case)
+	var buf [10]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = '0' + byte(n%10)
+		n /= 10
+	}
+	return string(buf[i:])
 }
