@@ -13,6 +13,7 @@ const (
 	DefaultWakeInterval            = 15 * time.Minute
 	DefaultScheduleRefreshInterval = 3 * time.Hour
 	DefaultNTPServer               = "time.cloudflare.com"
+	DefaultTelemetryEnabled        = true
 )
 
 // Environment-specific configuration (must be provided via embedded text files).
@@ -37,6 +38,9 @@ var (
 
 	//go:embed ntp_server.text
 	ntpServerOverride string
+
+	//go:embed telemetry_enabled.text
+	telemetryEnabledOverride string
 )
 
 // BrokerAddr returns the MQTT broker address from broker.text file.
@@ -87,4 +91,14 @@ func NTPServer() string {
 		return override
 	}
 	return DefaultNTPServer
+}
+
+// TelemetryEnabled returns whether telemetry collection is enabled.
+// Returns DefaultTelemetryEnabled unless overridden via telemetry_enabled.text.
+// Set to "false" or "0" to disable.
+func TelemetryEnabled() bool {
+	if override := strings.TrimSpace(telemetryEnabledOverride); override != "" {
+		return override != "false" && override != "0"
+	}
+	return DefaultTelemetryEnabled
 }

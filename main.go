@@ -255,12 +255,16 @@ func main() {
 		logger.Warn("ntp:time-not-synced", slog.String("fallback", "MQTT timestamp"))
 	}
 
-	// Initialize telemetry (non-fatal if collector not configured)
-	collectorAddr, err := config.TelemetryCollectorAddr()
-	if err != nil {
-		logger.Warn("telemetry:config-invalid", slog.String("err", err.Error()))
-	} else if err := telemetry.Init(stack, logger, collectorAddr); err != nil {
-		logger.Warn("telemetry:init-failed", slog.String("err", err.Error()))
+	// Initialize telemetry (if enabled)
+	if config.TelemetryEnabled() {
+		collectorAddr, err := config.TelemetryCollectorAddr()
+		if err != nil {
+			logger.Warn("telemetry:config-invalid", slog.String("err", err.Error()))
+		} else if err := telemetry.Init(stack, logger, collectorAddr); err != nil {
+			logger.Warn("telemetry:init-failed", slog.String("err", err.Error()))
+		}
+	} else {
+		logger.Info("telemetry:disabled")
 	}
 
 	// Start debug console server
