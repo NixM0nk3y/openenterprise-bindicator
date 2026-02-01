@@ -190,16 +190,8 @@ func main() {
 	logger.Info("config:broker", slog.String("addr", brokerAddr.String()))
 
 	// Load timing configuration
-	if interval, err := config.WakeInterval(); err == nil {
-		wakeInterval = interval
-	} else {
-		logger.Warn("config:wake-interval-invalid", slog.String("err", err.Error()), slog.Duration("default", wakeInterval))
-	}
-	if interval, err := config.ScheduleRefreshInterval(); err == nil {
-		scheduleRefreshInterval = interval
-	} else {
-		logger.Warn("config:schedule-refresh-interval-invalid", slog.String("err", err.Error()), slog.Duration("default", scheduleRefreshInterval))
-	}
+	wakeInterval = config.WakeInterval()
+	scheduleRefreshInterval = config.ScheduleRefreshInterval()
 	logger.Info("config:timing",
 		slog.Duration("wake_interval", wakeInterval),
 		slog.Duration("schedule_refresh_interval", scheduleRefreshInterval),
