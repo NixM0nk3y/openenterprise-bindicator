@@ -69,7 +69,9 @@ type Span struct {
 	EndTime    int64
 	NameLen    uint8
 	Name       [32]byte
-	Kind       uint8 // SpanKindInternal, SpanKindServer, SpanKindClient
+	StatusLen  uint8
+	StatusMsg  [48]byte // Status message (e.g., error description or result)
+	Kind       uint8    // SpanKindInternal, SpanKindServer, SpanKindClient
 	StatusOK   bool
 	Active     bool // Currently recording (between StartSpan and EndSpan)
 	Pending    bool // Completed but not yet flushed
@@ -313,6 +315,28 @@ func EndSpan(idx int, statusOK bool) {
 	if SpanCount < len(SpanQueue) {
 		SpanCount++
 	}
+}
+
+// SetSpanStatus sets the status message on an active span.
+func SetSpanStatus(idx int, msg string) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	if idx < 0 || idx >= len(SpanQueue) {
+		return
+	}
+
+	span := &SpanQueue[idx]
+	if !span.Active {
+		return
+	}
+
+	msgLen := len(msg)
+	if msgLen > len(span.StatusMsg) {
+		msgLen = len(span.StatusMsg)
+	}
+	span.StatusLen = uint8(msgLen)
+	copy(span.StatusMsg[:], msg[:msgLen])
 }
 
 // GetLogQueue returns the current log queue for testing
