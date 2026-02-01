@@ -5,9 +5,14 @@ bindicator-cli
 #
 coverage.out
 
-# Credentials and config
-*.text
+# Credentials (sensitive - never commit real values)
+credentials/*.text
 .env
+
+# Environment-specific config (sensitive - never commit real values)
+config/broker.text
+config/clientid.text
+config/telemetry_collector.text
 
 
 #
