@@ -1,0 +1,108 @@
+name: Test Suite
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      debug_enabled:
+        type: boolean
+        description: "Run with debug logging"
+        required: false
+        default: false
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: .go-version
+          cache-dependency-path: go.sum
+
+      - name: Create placeholder config files
+        run: |
+          # Config files (embedded at compile time)
+          echo "0.0.0.0:1883" > config/broker.text
+          echo "ci-placeholder" > config/clientid.text
+          echo "0.0.0.0:4318" > config/telemetry_collector.text
+          # Credentials
+          echo "ci-password" > credentials/console_password.text
+          echo "ci-wifi-pass" > credentials/password.text
+          echo "ci-wifi-ssid" > credentials/ssid.text
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Verify dependencies
+        run: go mod verify
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run staticcheck
+        uses: dominikh/staticcheck-action@v1
+        with:
+          version: "latest"
+          install-go: false
+
+      - name: Run tests
+        run: go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Display coverage summary
+        run: go tool cover -func=coverage.out
+
+  build:
+    name: Build Check (TinyGo)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: .go-version
+          cache-dependency-path: go.sum
+
+      - name: Set up TinyGo
+        uses: acifani/setup-tinygo@v2
+        with:
+          tinygo-version: "0.40.0"
+
+      - name: Verify TinyGo installation
+        run: tinygo version
+
+      - name: Create placeholder config files
+        run: |
+          # Config files (embedded at compile time)
+          echo "0.0.0.0:1883" > config/broker.text
+          echo "ci-placeholder" > config/clientid.text
+          echo "0.0.0.0:4318" > config/telemetry_collector.text
+          # Credentials
+          echo "ci-password" > credentials/console_password.text
+          echo "ci-wifi-pass" > credentials/password.text
+          echo "ci-wifi-ssid" > credentials/ssid.text
+
+      - name: Build firmware
+        run: make build
+
+      - name: Verify binary created
+        run: |
+          ls -la build.uf2
+          file build.uf2

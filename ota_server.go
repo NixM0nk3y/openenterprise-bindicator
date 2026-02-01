@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"openenterprise/bindicator/ota"
+	"openenterprise/bindicator/telemetry"
 
 	"github.com/soypat/lneto/tcp"
 	"github.com/soypat/lneto/x/xnet"
@@ -189,7 +190,12 @@ func otaServerLoop() {
 			continue
 		}
 
-		logger.Info("ota:connected")
+		// Pause telemetry BEFORE logging connection - ensures no network contention
+		// This blocks until any in-progress HTTP operations complete
+		telemetry.Pause()
+		SetBindicatorPaused(true)
+
+		logger.Info("ota:connected", slog.String("ip", formatRemoteIP(conn.RemoteAddr())))
 
 		// Handle OTA session
 		func() {
@@ -207,6 +213,10 @@ func otaServerLoop() {
 			time.Sleep(100 * time.Millisecond)
 		}
 		conn.Abort()
+
+		// Resume background tasks after connection cleanup
+		SetBindicatorPaused(false)
+		telemetry.Resume()
 		logger.Info("ota:disconnected")
 
 		// Disable OTA after successful session (security: minimize window)
@@ -215,6 +225,7 @@ func otaServerLoop() {
 }
 
 // handleOTASession handles a single OTA update session
+// Note: Caller is responsible for pausing/resuming telemetry and bindicator
 func handleOTASession(conn *tcp.Conn, logger *slog.Logger) {
 	var readBuf [128]byte // Large enough for DONE + 64-char hash + newline
 
@@ -319,6 +330,12 @@ func handleOTASession(conn *tcp.Conn, logger *slog.Logger) {
 				slog.String("flash_offset", formatHex(flashOffset)),
 				slog.String("xip_addr", formatHex(xipAddr)),
 			)
+
+			// Flush telemetry just before reboot to capture validation messages
+			telemetry.Resume() // Resume briefly to allow flush
+			telemetry.Flush()
+			time.Sleep(3000 * time.Millisecond) // Allow network stack to complete
+
 			ota.RebootToPartition(targetPartition)
 			// If we get here, reboot failed
 			errCode := ota.GetRebootResult()
@@ -359,21 +376,12 @@ func handleOTASession(conn *tcp.Conn, logger *slog.Logger) {
 		// Calculate flash offset and which sectors need erasing
 		flashOffset := partitionOffset + totalBytes
 
-		// Log chunk receive with hash info for first few chunks (helps debug)
-		if chunkNum < 3 {
-			// Show first 8 bytes of chunk for verification
-			logger.Info("ota:chunk-debug",
-				slog.Int("chunk", chunkNum),
-				slog.Int("size", int(chunkLen)),
-				slog.String("first8", formatHashHex(otaChunk[:8])),
-			)
-		} else if chunkNum%20 == 0 {
-			logger.Debug("ota:chunk-received",
-				slog.Int("chunk", chunkNum),
-				slog.Int("size", int(chunkLen)),
-				slog.Int("total", int(totalBytes)),
-			)
-		}
+		// Log every chunk at DEBUG level (avoids otel/buffer overhead)
+		/*logger.Debug("ota:chunk-debug",
+			slog.Int("chunk", chunkNum),
+			slog.Int("size", int(chunkLen)),
+			slog.Int("total", int(totalBytes)),
+		)*/
 
 		// Erase sectors on-demand (4KB each) to avoid blocking for too long
 		startSector := totalBytes / ota.SectorSize

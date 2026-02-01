@@ -102,7 +102,7 @@ func fetchScheduleViaMQTT(
 	err = rstack.DoDialTCP(&conn, lport, brokerAddr, mqttTimeout, mqttRetries)
 	if err != nil {
 		logger.Error("mqtt:dial-failed", slog.String("err", err.Error()))
-		closeConn(&conn)
+		closeConn(&conn, stack, brokerAddr)
 		return nil, err
 	}
 
@@ -112,7 +112,7 @@ func fetchScheduleViaMQTT(
 	err = client.StartConnect(&conn, &varconn)
 	if err != nil {
 		logger.Error("mqtt:start-connect-failed", slog.String("err", err.Error()))
-		closeConn(&conn)
+		closeConn(&conn, stack, brokerAddr)
 		return nil, err
 	}
 
@@ -128,7 +128,7 @@ func fetchScheduleViaMQTT(
 	}
 	if !client.IsConnected() {
 		logger.Error("mqtt:connect-timeout")
-		closeConn(&conn)
+		closeConn(&conn, stack, brokerAddr)
 		return nil, errors.New("mqtt connect timeout")
 	}
 	logger.Info("mqtt:connected")
@@ -139,7 +139,7 @@ func fetchScheduleViaMQTT(
 	err = client.StartSubscribe(varSub)
 	if err != nil {
 		logger.Error("mqtt:subscribe-failed", slog.String("err", err.Error()))
-		closeConn(&conn)
+		closeConn(&conn, stack, brokerAddr)
 		return nil, err
 	}
 	logger.Info("mqtt:subscribed", slog.String("topic", string(topicResponse)))
@@ -159,7 +159,7 @@ func fetchScheduleViaMQTT(
 	err = client.PublishPayload(pubFlags, pubVar, []byte("ping"))
 	if err != nil {
 		logger.Error("mqtt:publish-failed", slog.String("err", err.Error()))
-		closeConn(&conn)
+		closeConn(&conn, stack, brokerAddr)
 		return nil, err
 	}
 	logger.Info("mqtt:published", slog.String("topic", string(topicRequest)))
@@ -175,7 +175,7 @@ func fetchScheduleViaMQTT(
 
 	// Disconnect cleanly
 	client.Disconnect(errors.New("session complete"))
-	closeConn(&conn)
+	closeConn(&conn, stack, brokerAddr)
 
 	if !gotResponse {
 		logger.Error("mqtt:no-response")
@@ -220,12 +220,15 @@ func onMQTTMessage(pubHead mqtt.Header, varPub mqtt.VariablesPublish, r io.Reade
 }
 
 // closeConn closes the TCP connection and waits for it to close
-func closeConn(conn *tcp.Conn) {
+func closeConn(conn *tcp.Conn, stack *xnet.StackAsync, addr netip.AddrPort) {
 	conn.Close()
 	for i := 0; i < 50 && !conn.State().IsClosed(); i++ {
 		time.Sleep(100 * time.Millisecond)
 	}
 	conn.Abort()
+
+	// Discard ARP query to free slot for next connection
+	stack.DiscardResolveHardwareAddress6(addr.Addr())
 }
 
 // bytesEqual compares two byte slices without allocation

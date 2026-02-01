@@ -2,9 +2,17 @@
 build.uf2
 bindicator-cli
 
-# Credentials and config
-*.text
+#
+coverage.out
+
+# Credentials (sensitive - never commit real values)
+credentials/*.text
 .env
+
+# Environment-specific config (sensitive - never commit real values)
+config/broker.text
+config/clientid.text
+config/telemetry_collector.text
 
 
 #
