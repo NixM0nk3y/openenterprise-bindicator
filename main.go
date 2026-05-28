@@ -419,9 +419,13 @@ func main() {
 		telemetry.EndSpan(cycleSpanIdx, true)
 
 		// Sleep until next cycle, but wake early on manual refresh request
+		untilNextRefresh := time.Duration(0)
+		if !lastScheduleFetch.IsZero() {
+			untilNextRefresh = scheduleRefreshInterval - time.Since(lastScheduleFetch)
+		}
 		logger.Info("sleep:starting",
 			slog.Duration("duration", wakeInterval),
-			slog.Duration("until_next_refresh", scheduleRefreshInterval-time.Since(lastScheduleFetch)),
+			slog.Duration("until_next_refresh", untilNextRefresh),
 		)
 		sleepWithRefreshCheck(wakeInterval, refreshChan, logger)
 		logger.Info("sleep:waking")
